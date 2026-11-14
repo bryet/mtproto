@@ -1,4 +1,3 @@
 /target/
-/docker-dist/
 /config.yaml
 *.sock

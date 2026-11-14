@@ -1,7 +1,6 @@
 pub mod auth;
 pub mod cli;
 pub mod config;
-pub mod container;
 pub mod crypto;
 pub mod discovery;
 pub mod maintenance;

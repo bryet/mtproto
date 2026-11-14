@@ -12,7 +12,7 @@ use anyhow::{bail, Context, Result};
 use socket2::{Domain, Protocol as SocketProtocol, SockAddr, Socket, Type};
 use std::{
     net::{IpAddr, SocketAddr},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{atomic::Ordering, Arc},
     time::Duration,
 };
@@ -390,11 +390,7 @@ impl Drop for UnixPath {
     }
 }
 
-pub type ConfigLoader = fn(&Path) -> Result<Config>;
 pub async fn run(state: Arc<State>, path: PathBuf) -> Result<()> {
-    run_with_loader(state, path, Config::load).await
-}
-pub async fn run_with_loader(state: Arc<State>, path: PathBuf, loader: ConfigLoader) -> Result<()> {
     let c = state.config();
     let mut tasks = JoinSet::new();
     let mut bound = 0;
@@ -484,7 +480,7 @@ pub async fn run_with_loader(state: Arc<State>, path: PathBuf, loader: ConfigLoa
                 _ = terminate.recv() => break,
                 _ = interrupt.recv() => break,
                 _ = reload.recv() => {
-                    match loader(&path) {
+                    match Config::load(&path) {
                         Ok(next) => match state.reload(next) {
                             Ok(()) => { tracing::info!("配置已重载：新连接使用新配置，已有连接后续请求更新广告标签和读取超时"); state.print_links(); }
                             Err(error) => tracing::error!(%error, "配置重载失败，保留旧配置"),

@@ -1,14 +1,14 @@
 # MTProto
 
-当前仓库 `mtproxy.py` 的异步 Rust 重构，使用 Tokio。配置采用 `config.example.yaml` 的大写字段和模式开关，项目不依赖 Python 运行时。
+基于 Python `mtproxy.py` 实现的异步 Rust 重构，使用 Tokio。配置采用 `config.example.yaml` 的大写字段和模式开关，项目不依赖 Python 运行时。
 
 ## 构建和运行
 
 需要 Rust **1.85 或更新版本**、C 编译器（HTTPS 依赖的 ring 构建需要），Linux/macOS 支持 TCP 和 Unix socket。
 
 ```bash
-cd mtproto
-cargo build --release --locked
+# 在项目根目录运行
+cargo build --release --locked --bin mtproto
 cp config.example.yaml config.yaml
 
 # 生成随机密钥，然后把输出填入 config.yaml 的 SECRET
@@ -23,59 +23,47 @@ cp config.example.yaml config.yaml
 
 请在部署前更换示例 SECRET。监听端口还需由服务器防火墙/安全组放行；使用 443 等低端口需要相应系统权限。日志输出到 stderr，代理链接输出到 stdout。`RUST_LOG` 可覆盖配置日志级别。
 
-## Docker 镜像与自动发布
+## 二进制发布
 
-`.github/workflows/release-build.yml` 通过 Actions 手动触发，输入 `latest`、`0.1.0`、`v0.1.0` 或 `0.1.0-rc.1`。工作流先构建 AMD64/ARM64 musl 静态二进制，再复用这些产物构建多架构 `scratch` 镜像，推送至 `ghcr.io/<owner>/<repository>`，同时发布二进制压缩包到 GitHub Release。
+`.github/workflows/release-build.yml` 构建 Linux AMD64/ARM64 的 musl 二进制，并将压缩包发布到 GitHub Release。
 
-- 输入 `latest`：镜像标签 `latest`。
-- 输入 `0.1.0` / `v0.1.0`：镜像标签 `0.1.0`、`latest`。
-- 输入 `0.1.0-rc.1`：只推送预发布标签，不更新 `latest`。
-- 使用工作流的 `GITHUB_TOKEN`，无需额外 Docker 密码；若已有同名 GHCR 包，需允许当前仓库的 Actions 写入该包。包的公开/私有状态由 GitHub Packages 设置决定。
+### 触发方式
 
-镜像以 UID/GID `65532:65532` 运行，默认监听 8443。`docker-entrypoint` 是编译后的 Rust 二进制，而不是 shell 脚本，兼容 `scratch`。默认读取 `/etc/mtproto/config.yaml`；镜像中的配置只是示例，请部署前用自己的文件只读挂载覆盖，或显式设置环境变量。
+- **手动运行**：在 Actions 中选择 **Build and Release**，填写 `version`，例如 `0.1.0`、`v0.1.0` 或 `0.1.0-rc.1`。
+- **手动输入 `latest`**：读取 `Cargo.toml` 的包版本，例如 `0.1.0`，发布为 `v0.1.0`；不会创建名为 `latest` 的 Release。
+- **推送标签**：推送 `v*` 标签时自动构建，标签应使用有效 Rust 版本，例如 `v0.1.0`。
+- **清理缓存**：手动运行时勾选 `clear_cache`，在构建前删除 `Linux-cargo-` 前缀的 Rust 构建缓存；默认不清理。标签推送不执行此清理步骤。
 
-入口支持 `SECRET`、`DOMAIN`、`TAG`：
-- 未设置环境变量时完整保留 YAML 配置。
-- `SECRET` 覆盖主密钥（32 个十六进制字符）。只设置 SECRET 时切换为 secure 模式。
-- `DOMAIN` 设置 TLS_DOMAIN 并切换为 TLS-only；未设置 SECRET 时保留配置文件中的密钥，不注入固定密钥。
-- `TAG` 覆盖 AD_TAG；未设置时保留 YAML 中的标签，显式传入空值可清除。
-- `CONFIG_FILE` 可覆盖默认配置路径，`-c` / `--config` 的优先级更高。
+工作流仅在 Runner 工作目录中更新 `Cargo.toml` 版本，不提交或推送版本修改。包含连字符的版本会标记为预发布。发布使用 `GITHUB_TOKEN`，需要仓库内容写入权限；缓存清理需要 Actions 写入权限。
 
-覆盖只作用于内存，不调用 `sed`、不修改挂载文件，也不会误改 `SECRET_1` 等其他密钥。SIGUSR2 重载时重新读取 YAML 并再次应用容器环境变量。挂载文件需要允许 UID 65532 读取；不要把生产 SECRET 放入 Dockerfile 或构建上下文。
+### 发布产物
 
-以下以已有的宿主机 `/root/test/config.yaml` 为例（与本项目示例相同的 YAML 字段）：
+| 平台 | 文件名示例 |
+| --- | --- |
+| Linux AMD64 | `mtproto-x86_64-unknown-linux-musl-v0.1.0.tar.gz` |
+| Linux ARM64 | `mtproto-aarch64-unknown-linux-musl-v0.1.0.tar.gz` |
 
-```bash
-# 先修改 /root/test/config.yaml 中的 SECRET；镜像地址请替换成实际地址
-docker run -d --name mtproto --restart unless-stopped \
-  -p 8443:8443 \
-  --mount type=bind,src=/root/test/config.yaml,dst=/etc/mtproto/config.yaml,readonly \
-  ghcr.io/<owner>/<repository>:latest
-
-# 仅检查配置，不开启代理或访问公网
-docker run --rm \
-  --mount type=bind,src=/root/test/config.yaml,dst=/etc/mtproto/config.yaml,readonly \
-  ghcr.io/<owner>/<repository>:latest --check-config
-
-# 在同一份配置上使用环境变量选择 Fake-TLS（SECRET 使用自己的密钥）
-docker run -d --name mtproto-tls --restart unless-stopped \
-  -p 8443:8443 \
-  --mount type=bind,src=/root/test/config.yaml,dst=/etc/mtproto/config.yaml,readonly \
-  -e SECRET=0123456789abcdef0123456789abcdef \
-  -e DOMAIN=itunes.apple.com \
-  ghcr.io/<owner>/<repository>:latest
-```
-
-容器没有 shell，也不需要 Python、OpenSSL 动态库或 QEMU。如需宿主机 443 端口，可使用 `-p 443:8443` 并将 Telegram 链接中的端口调整为 443。
-
-本地构建也必须使用 musl 静态产物；为每个架构同时构建 `mtproto` 和 `docker-entrypoint`（`cargo build --release --locked --bins --target <musl-target>`），分别放在 `docker-dist/amd64/` 和 `docker-dist/arm64/` 下，然后运行：
+压缩包包含 `mtproto` 和 `config.example.yaml`。从 GitHub Releases 下载适合服务器架构的压缩包后，在下载目录执行：
 
 ```bash
-docker buildx build --platform linux/amd64,linux/arm64 \
-  -t ghcr.io/<owner>/<repository>:latest --push .
+# ARM64 请替换为 aarch64 对应的文件名
+tar -xzf mtproto-x86_64-unknown-linux-musl-v0.1.0.tar.gz
+cp config.example.yaml config.yaml
+
+# 生成随机密钥，再将输出填入 config.yaml 的 SECRET
+./mtproto --generate-secret
+./mtproto -c config.yaml --check-config
+./mtproto -c config.yaml
 ```
 
-Dockerfile 只复制预构建二进制及公开配置示例，不重新编译 Rust。普通 glibc 动态链接的 `target/release/mtproto` 不能放入此 `scratch` 镜像。
+也可以直接指定已有配置文件：
+
+```bash
+./mtproto -c /root/test/config.yaml --check-config
+./mtproto -c /root/test/config.yaml
+```
+
+程序默认读取当前工作目录的 `config.yaml`，可用 `-c` / `--config` 指定路径。端口、密钥、TLS 域名和广告标签均在 YAML 中设置；程序不使用环境变量覆盖 YAML 配置。日志级别仍可通过 `RUST_LOG` 覆盖。
 
 ## 配置格式
 
@@ -169,7 +157,8 @@ Unix 平台在正常启动时自动将 `RLIMIT_NOFILE` 软上限提高到已有�
 - `src/maintenance.rs`：官方中间代理列表/密钥更新、证书记录探测、统计和诊断日志。
 - `src/discovery.rs`：按 Linux 网卡绑定的 IPv4/IPv6 公网地址探测。
 - `src/system.rs`：Unix 文件描述符资源上限调整。
-- `src/server.rs` / `src/main.rs`：监听、双向转发、指标、CLI 与信号。
+- `src/server.rs`：监听、双向转发、指标与信号。
+- `src/cli.rs` / `src/main.rs`：命令行参数、配置加载与程序入口。
 
 ## 测试
 
@@ -179,15 +168,9 @@ cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 ```
 
-测试覆盖 AES 标准向量、YAML/旧格式、多 secret、模式禁用、时间戳、重放缓存、CRC/序号/过大帧、Fake-TLS 分片与握手/业务数据共包、quickack、广告标签、IPv4/IPv6 中间代理密钥、连接清理、localhost fallback 和模拟中间代理完整 CBC 握手，以及诊断日志清空、DNS 首地址失败回退、SO_BINDTODEVICE 回环网卡探测、TCP keepalive 参数、关闭/RST socket 控制、现有连接广告标签/读取超时重载、独立子进程中的文件描述符上限调整。
+当前保留 `src/` 内的单元测试，覆盖 AES 标准向量、YAML/旧格式、多 secret、时间戳与重放缓存、帧 CRC/序号/长度校验、Fake-TLS 记录分片、quickack、广告请求、连接清理、localhost fallback、诊断日志、DNS 地址回退、Linux 网卡绑定、TCP keepalive、读取超时与广告标签热重载，以及子进程中的文件描述符上限调整。
 
-`tests/python_vectors.txt` 是从仓库原 Python 实现生成的确定性协议向量；Rust 测试逐字节对照。常规测试仅使用内存或 loopback，不连接 Telegram 或公网服务，不需要 Python。
-
-重新生成参考向量（需要 Python cryptography）：
-
-```bash
-python3 -I tests/python_reference.py ../mtproxy.py tests/python_vectors.txt
-```
+原 `tests/` 集成测试目录和 Python 参考向量已移除，当前测试不依赖 Python。测试使用内存流、本地回环连接或隔离子进程，不连接 Telegram 或公网服务。
 
 协议测试不能替代真实 Telegram 客户端部署联调。上线前建议分别启用 classic、secure、TLS，以及配置 AD_TAG 后进行收发测试；当前没有宣称真实 Telegram 端到端或广告展示已验证。
 

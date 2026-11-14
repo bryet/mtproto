@@ -11,10 +11,6 @@ description = "Async Rust port of the Python MTProto proxy"
 name = "mtproto"
 path = "src/main.rs"
 
-[[bin]]
-name = "docker-entrypoint"
-path = "docker-entrypoint"
-
 [dependencies]
 anyhow = "1.0"
 libc = "0.2"

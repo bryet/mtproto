@@ -1,4 +1,4 @@
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    mtproto::cli::run(false).await
+    mtproto::cli::run().await
 }

@@ -165,9 +165,6 @@ impl Config {
         Self::parse(&text)
     }
     pub fn parse(text: &str) -> Result<Self> {
-        Self::parse_with_overrides(text, Mapping::new())
-    }
-    pub fn parse_with_overrides(text: &str, overrides: Mapping) -> Result<Self> {
         // Normalize the original example's assignment syntax, not arbitrary YAML values.
         let normalized = text
             .lines()
@@ -184,12 +181,7 @@ impl Config {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        let mut fields: Mapping =
-            serde_yaml::from_str(&normalized).context("配置必须为 YAML 映射")?;
-        for (key, value) in overrides {
-            fields.insert(key, value);
-        }
-        let mut f = Fields(fields);
+        let mut f = Fields(serde_yaml::from_str(&normalized).context("配置必须为 YAML 映射")?);
         let log_level = f.text("LOG_LEVEL", "info")?.to_lowercase();
         if !["debug", "info", "warn", "error", "trace"].contains(&log_level.as_str()) {
             bail!("无效 LOG_LEVEL");

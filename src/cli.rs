@@ -2,15 +2,9 @@ use crate::{config::Config, crypto, server, state::State};
 use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
 
-pub async fn run(container: bool) -> Result<()> {
+pub async fn run() -> Result<()> {
     let mut args = std::env::args().skip(1);
-    let mut path = if container {
-        std::env::var_os("CONFIG_FILE")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/etc/mtproto/config.yaml"))
-    } else {
-        PathBuf::from("config.yaml")
-    };
+    let mut path = PathBuf::from("config.yaml");
     let mut check = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -31,12 +25,7 @@ pub async fn run(container: bool) -> Result<()> {
             _ => bail!("未知参数 {arg}；使用 --help 查看帮助"),
         }
     }
-    let loader: server::ConfigLoader = if container {
-        crate::container::load_config
-    } else {
-        Config::load
-    };
-    let config = loader(&path)?;
+    let config = Config::load(&path)?;
     if check {
         println!(
             "配置有效：{}；{} 个 secret",
@@ -53,5 +42,5 @@ pub async fn run(container: bool) -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
     crate::system::setup_file_limit();
-    server::run_with_loader(State::new(config), path, loader).await
+    server::run(State::new(config), path).await
 }
