@@ -1,0 +1,37 @@
+[package]
+name = "mtproto"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "GPL-2.0-only"
+description = "Async Rust port of the Python MTProto proxy"
+
+[dependencies]
+anyhow = "1.0"
+libc = "0.2"
+hyper = { version = "0.14", features = ["client", "http1", "runtime"] }
+aes = "0.8"
+cipher = "0.4"
+ctr = "0.9"
+crc32fast = "1.4"
+hex = "0.4"
+hmac = "0.12"
+md-5 = "0.10"
+num-bigint = "0.4"
+rand = "0.8"
+reqwest = { version = "0.11.27", default-features = false, features = ["rustls-tls"] }
+# Newer URL/ICU dependency versions require Rust 1.86+.
+url = "=2.4.1"
+encoding_rs = "=0.8.35"
+serde_yaml = "0.9"
+sha1 = "0.10"
+sha2 = "0.10"
+socket2 = { version = "0.5", features = ["all"] }
+tokio = { version = "1.43", features = ["full", "test-util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

@@ -1,0 +1,54 @@
+# 日志级别 debug/info/warn/error
+LOG_LEVEL: "info"
+
+# 代理端口（兼容数字或带引号的数字）
+PORT: "8443"
+
+# secret：必须是 32 个十六进制字符；部署前请更换
+SECRET: "0123456789abcdef0123456789abcdef"
+
+# 模式开关
+MODES_CLASSIC: false
+MODES_SECURE: true
+MODES_TLS: false
+
+# Fake-TLS 模式的域名，未认证客户端默认转发至此域名的 443 端口
+# TLS_DOMAIN: "itunes.apple.com"
+
+# 广告标签，可从 @MTProxybot 获取；配置后默认启用 Telegram 中间代理
+# AD_TAG: ""
+
+# 可选兼容字段；不填写时使用 Python 版本的默认值
+# SECRET_1: "0123456789abcdef0123456789abcdef"
+# LISTEN_ADDR_IPV4: "0.0.0.0"
+# LISTEN_ADDR_IPV6: "::"
+# LISTEN_UNIX_SOCK: ""
+# MY_DOMAIN: "proxy.example.com"
+# MASK: true
+# MASK_HOST: "itunes.apple.com"
+# MASK_PORT: 443
+# USE_MIDDLE_PROXY: false
+# PREFER_IPV6: true
+# FAST_MODE: true
+# PROXY_PROTOCOL: false  # 仅应在可信反向代理后开启
+# REPLAY_CHECK_LEN: 65536
+# CLIENT_IPS_LEN: 131072
+# IGNORE_TIME_SKEW: false
+# METRICS_PORT: 9090
+# METRICS_LISTEN_ADDR_IPV4: "127.0.0.1"
+# METRICS_LISTEN_ADDR_IPV6: "::1"
+# METRICS_WHITELIST: ["127.0.0.1", "::1"]
+# METRICS_PREFIX: "mtproxy_"
+# METRICS_EXPORT_LINKS: false
+# PUBLIC_IPV4: "203.0.113.1"  # NAT 场景可手动指定，避免公网 IP 探测失败
+# PUBLIC_IPV6: "2001:db8::1"
+# CLIENT_HANDSHAKE_TIMEOUT: 10  # 显式固定；未填写时随机 5–14 秒
+# TG_CONNECT_TIMEOUT: 10
+# TG_READ_TIMEOUT: 60
+# STATS_PRINT_PERIOD: 600
+# PROXY_INFO_UPDATE_PERIOD: 86400
+# GET_CERT_LEN_PERIOD: 18000  # 显式固定；未填写时随机 14400–21599 秒
+# TO_TG_BUFSIZE: 65536
+# TO_CLT_BUFSIZE: [16384, 100, 131072]
+# CLIENT_KEEPALIVE: 600  # 客户端空闲时间和探测间隔均为此值（秒）
+# CLIENT_ACK_TIMEOUT: 300
