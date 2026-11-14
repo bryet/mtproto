@@ -13,165 +13,159 @@ on:
         required: false
         default: false
         type: boolean
-
   push:
     tags:
       - 'v*'
 
+# Serialize this workflow so cache clearing cannot race another release build.
+concurrency:
+  group: release-build
+  cancel-in-progress: false
+
 permissions:
-  contents: write
-  actions: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # ── 版本准备 ─────────────────────────────────────────────
   prepare:
     name: Prepare release
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       version: ${{ steps.version.outputs.VERSION }}
       tag_name: ${{ steps.version.outputs.TAG_NAME }}
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Determine version
+      - name: Determine and validate version
         id: version
-        shell: bash
         env:
           INPUT_VERSION: ${{ inputs.version }}
         run: |
-          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
-            TAG="${GITHUB_REF_NAME}"
-            VERSION="${TAG#v}"
-          else
-            VERSION="${INPUT_VERSION}"
+          python3 -I - <<'PY'
+          import os
+          import re
+          import tomllib
+          from pathlib import Path
 
-            if [[ "$VERSION" == "latest" ]]; then
-              VERSION=$(awk '
-                /^\[package\]/ { package=1; next }
-                /^\[/ { package=0 }
-                package && /^version[[:space:]]*=/ {
-                  gsub(/"/, "", $3)
-                  print $3
-                  exit
-                }
-              ' Cargo.toml)
-            fi
+          if os.environ["GITHUB_EVENT_NAME"] == "push":
+              version = os.environ["GITHUB_REF_NAME"]
+          else:
+              version = os.environ["INPUT_VERSION"]
+              if version == "latest":
+                  with open("Cargo.toml", "rb") as file:
+                      version = tomllib.load(file)["package"]["version"]
+          version = version.removeprefix("v")
+          number = r"(?:0|[1-9][0-9]*)"
+          identifier = r"(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
+          pattern = rf"{number}\.{number}\.{number}(?:-{identifier}(?:\.{identifier})*)?"
+          if len(version) > 100 or re.fullmatch(pattern, version) is None:
+              raise SystemExit("ERROR: Use a valid version such as 0.1.0 or 0.1.0-rc.1")
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
+              output.write(f"VERSION={version}\nTAG_NAME=v{version}\n")
+          PY
 
-            VERSION="${VERSION#v}"
-            TAG="v${VERSION}"
-          fi
-
-          if [[ -z "$VERSION" ]]; then
-            echo "ERROR: Unable to determine release version."
-            exit 1
-          fi
-
-          echo "VERSION=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "TAG_NAME=${TAG}" >> "$GITHUB_OUTPUT"
-
-  # ── 删除构建缓存（可选）──────────────────────────────────
   clear-cache:
     name: Clear build cache
     runs-on: ubuntu-latest
+    needs: prepare
     if: github.event_name == 'workflow_dispatch' && inputs.clear_cache
-
+    timeout-minutes: 10
+    permissions:
+      actions: write
     steps:
       - name: Delete Rust build caches
         uses: actions/github-script@v7
         with:
           script: |
-            const caches = await github.paginate(
+            const pages = await github.paginate(
               github.rest.actions.getActionsCacheList,
-              {
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                per_page: 100
-              }
+              { owner: context.repo.owner, repo: context.repo.repo, per_page: 100 }
             );
-
-            const targets = caches.filter(cache =>
-              cache.key.startsWith('Linux-cargo-')
-            );
-
+            // Accept both normalized cache entries and wrapped API pages.
+            const caches = pages.flatMap(page => page.actions_caches ?? [page]);
+            const targets = caches.filter(cache => cache.key.startsWith('Linux-cargo-'));
             for (const cache of targets) {
-              await github.rest.actions.deleteActionsCacheById({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                cache_id: cache.id
-              });
+              try {
+                await github.rest.actions.deleteActionsCacheById({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  cache_id: cache.id
+                });
+              } catch (error) {
+                if (error.status !== 404) throw error;
+              }
             }
-
             core.info(`Deleted ${targets.length} Rust build caches.`);
 
-  # ── 多平台构建 ───────────────────────────────────────────
   build:
     name: Build (${{ matrix.target }})
     runs-on: ubuntu-latest
     needs: [prepare, clear-cache]
     if: >-
-      always() &&
+      !cancelled() &&
       needs.prepare.result == 'success' &&
       (needs.clear-cache.result == 'success' || needs.clear-cache.result == 'skipped')
-
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         target:
           - x86_64-unknown-linux-musl
           - aarch64-unknown-linux-musl
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      # 仅修改 Runner 工作目录，不提交或推送回仓库
-      - name: Update Cargo.toml version
+      - name: Set package and lockfile release version
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          python3 - <<'PY'
+          python3 -I - <<'PY'
           import os
           import re
+          import tomllib
+          from pathlib import Path
 
-          path = "Cargo.toml"
           version = os.environ["VERSION"]
-
-          with open(path, "r", encoding="utf-8") as f:
-              content = f.read()
-
-          pattern = r'(?ms)(^\[package\]\s*$.*?^\s*version\s*=\s*)("[^"]*")'
-
-          updated, count = re.subn(
-              pattern,
-              lambda m: m.group(1) + f'"{version}"',
-              content,
-              count=1
-          )
-
-          if count != 1:
-              raise SystemExit(
-                  "ERROR: Cannot find explicit version in [package] of Cargo.toml"
-              )
-
-          with open(path, "w", encoding="utf-8") as f:
-              f.write(updated)
-
-          print(f"Cargo.toml version updated to {version}")
+          manifest = Path("Cargo.toml")
+          lockfile = Path("Cargo.lock")
+          text = manifest.read_text()
+          with manifest.open("rb") as file:
+              package = tomllib.load(file)["package"]
+          # Restrict edits to the package's version, never a dependency version.
+          sections = re.split(r"(?m)(?=^\[)", text)
+          changed = 0
+          for index, section in enumerate(sections):
+              if section.startswith("[package]"):
+                  sections[index], count = re.subn(
+                      r'(?m)^(\s*version\s*=\s*)"[^"\n]*"',
+                      lambda match: f'{match.group(1)}"{version}"', section, count=1)
+                  changed += count
+          if changed != 1:
+              raise SystemExit("ERROR: Package version not found")
+          lock_text = lockfile.read_text()
+          blocks = lock_text.split("[[package]]")
+          changed = 0
+          for index in range(1, len(blocks)):
+              block = tomllib.loads("[[package]]" + blocks[index])["package"][0]
+              if block["name"] == package["name"] and "source" not in block:
+                  blocks[index], count = re.subn(
+                      r'(?m)^version\s*=\s*"[^"\n]*"',
+                      lambda _: f'version = "{version}"', blocks[index], count=1)
+                  changed += count
+          if changed != 1:
+              raise SystemExit("ERROR: Root package missing from Cargo.lock")
+          manifest.write_text("".join(sections))
+          lockfile.write_text("[[package]]".join(blocks))
           PY
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-
       - name: Install cross
         uses: taiki-e/install-action@v2
         with:
           tool: cross
-
       - name: Cache Rust artifacts
         uses: actions/cache@v4
         with:
@@ -179,63 +173,57 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: Linux-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          key: Linux-cargo-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
+            Linux-cargo-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}-
             Linux-cargo-${{ matrix.target }}-
-
-      - name: Build
-        run: cross build --target ${{ matrix.target }} --release
-
-      - name: Package
+      - name: Build and package
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          TARGET: ${{ matrix.target }}
         shell: bash
         run: |
-          VERSION="${{ needs.prepare.outputs.version }}"
-          TARGET="${{ matrix.target }}"
-          BIN_NAME="mtproto"
-          PKG_DIR="mtproto-v${VERSION}"
-          PKG_FILE="${BIN_NAME}-${TARGET}-v${VERSION}.tar.gz"
-
-          mkdir -p "${PKG_DIR}"
-
-          cp "target/${TARGET}/release/${BIN_NAME}" "${PKG_DIR}/"
-
-          for FILE in config.example.yaml; do
-            if [[ -f "$FILE" ]]; then
-              cp "$FILE" "${PKG_DIR}/"
-            fi
-          done
-
-          tar -czf "${PKG_FILE}" -C "${PKG_DIR}" .
-
-          rm -rf "${PKG_DIR}"
-
+          set -euo pipefail
+          cross build --locked --release --bin mtproto --target "$TARGET"
+          BINARY="target/$TARGET/release/mtproto"
+          readelf -l "$BINARY" > "$RUNNER_TEMP/program-headers"
+          readelf -d "$BINARY" > "$RUNNER_TEMP/dynamic-section"
+          if grep -q 'INTERP' "$RUNNER_TEMP/program-headers" || grep -q '(NEEDED)' "$RUNNER_TEMP/dynamic-section"; then
+            echo '::error::Release binary must be statically linked'
+            exit 1
+          fi
+          PACKAGE="mtproto-$TARGET-v$VERSION.tar.gz"
+          STAGING="$(mktemp -d "$RUNNER_TEMP/mtproto-package.XXXXXX")"
+          cp "$BINARY" config.example.yaml "$STAGING/"
+          tar -czf "$PACKAGE" -C "$STAGING" mtproto config.example.yaml
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: mtproto-${{ needs.prepare.outputs.version }}-${{ matrix.target }}
           path: mtproto-${{ matrix.target }}-v${{ needs.prepare.outputs.version }}.tar.gz
           if-no-files-found: error
+          retention-days: 7
 
-  # ── 发布 Release ─────────────────────────────────────────
   release:
     name: Create Release
     runs-on: ubuntu-latest
     needs: [prepare, build]
-
+    timeout-minutes: 10
+    permissions:
+      contents: write
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
-          path: ./artifacts
+          pattern: mtproto-${{ needs.prepare.outputs.version }}-*
+          path: artifacts
           merge-multiple: true
-
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.prepare.outputs.tag_name }}
           target_commitish: ${{ github.sha }}
-          files: ./artifacts/*.tar.gz
-          draft: false
+          files: artifacts/*.tar.gz
+          fail_on_unmatched_files: true
           prerelease: ${{ contains(needs.prepare.outputs.version, '-') }}
           generate_release_notes: true
-          token: ${{ secrets.GITHUB_TOKEN }}
