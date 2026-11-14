@@ -13,9 +13,6 @@ on:
         required: false
         default: false
         type: boolean
-  push:
-    tags:
-      - 'v*'
 
 # Serialize this workflow so cache clearing cannot race another release build.
 concurrency:
