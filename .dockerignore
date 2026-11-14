@@ -1,0 +1,11 @@
+# Only prebuilt binaries and the public configuration example enter the image context.
+**
+!Dockerfile
+!config.example.yaml
+!docker-dist/
+!docker-dist/amd64/
+!docker-dist/amd64/mtproto
+!docker-dist/amd64/docker-entrypoint
+!docker-dist/arm64/
+!docker-dist/arm64/mtproto
+!docker-dist/arm64/docker-entrypoint

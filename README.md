@@ -23,6 +23,60 @@ cp config.example.yaml config.yaml
 
 请在部署前更换示例 SECRET。监听端口还需由服务器防火墙/安全组放行；使用 443 等低端口需要相应系统权限。日志输出到 stderr，代理链接输出到 stdout。`RUST_LOG` 可覆盖配置日志级别。
 
+## Docker 镜像与自动发布
+
+`.github/workflows/release-build.yml` 通过 Actions 手动触发，输入 `latest`、`0.1.0`、`v0.1.0` 或 `0.1.0-rc.1`。工作流先构建 AMD64/ARM64 musl 静态二进制，再复用这些产物构建多架构 `scratch` 镜像，推送至 `ghcr.io/<owner>/<repository>`，同时发布二进制压缩包到 GitHub Release。
+
+- 输入 `latest`：镜像标签 `latest`。
+- 输入 `0.1.0` / `v0.1.0`：镜像标签 `0.1.0`、`latest`。
+- 输入 `0.1.0-rc.1`：只推送预发布标签，不更新 `latest`。
+- 使用工作流的 `GITHUB_TOKEN`，无需额外 Docker 密码；若已有同名 GHCR 包，需允许当前仓库的 Actions 写入该包。包的公开/私有状态由 GitHub Packages 设置决定。
+
+镜像以 UID/GID `65532:65532` 运行，默认监听 8443。`docker-entrypoint` 是编译后的 Rust 二进制，而不是 shell 脚本，兼容 `scratch`。默认读取 `/etc/mtproto/config.yaml`；镜像中的配置只是示例，请部署前用自己的文件只读挂载覆盖，或显式设置环境变量。
+
+入口支持 `SECRET`、`DOMAIN`、`TAG`：
+- 未设置环境变量时完整保留 YAML 配置。
+- `SECRET` 覆盖主密钥（32 个十六进制字符）。只设置 SECRET 时切换为 secure 模式。
+- `DOMAIN` 设置 TLS_DOMAIN 并切换为 TLS-only；未设置 SECRET 时保留配置文件中的密钥，不注入固定密钥。
+- `TAG` 覆盖 AD_TAG；未设置时保留 YAML 中的标签，显式传入空值可清除。
+- `CONFIG_FILE` 可覆盖默认配置路径，`-c` / `--config` 的优先级更高。
+
+覆盖只作用于内存，不调用 `sed`、不修改挂载文件，也不会误改 `SECRET_1` 等其他密钥。SIGUSR2 重载时重新读取 YAML 并再次应用容器环境变量。挂载文件需要允许 UID 65532 读取；不要把生产 SECRET 放入 Dockerfile 或构建上下文。
+
+以下以已有的宿主机 `/root/test/config.yaml` 为例（与本项目示例相同的 YAML 字段）：
+
+```bash
+# 先修改 /root/test/config.yaml 中的 SECRET；镜像地址请替换成实际地址
+docker run -d --name mtproto --restart unless-stopped \
+  -p 8443:8443 \
+  --mount type=bind,src=/root/test/config.yaml,dst=/etc/mtproto/config.yaml,readonly \
+  ghcr.io/<owner>/<repository>:latest
+
+# 仅检查配置，不开启代理或访问公网
+docker run --rm \
+  --mount type=bind,src=/root/test/config.yaml,dst=/etc/mtproto/config.yaml,readonly \
+  ghcr.io/<owner>/<repository>:latest --check-config
+
+# 在同一份配置上使用环境变量选择 Fake-TLS（SECRET 使用自己的密钥）
+docker run -d --name mtproto-tls --restart unless-stopped \
+  -p 8443:8443 \
+  --mount type=bind,src=/root/test/config.yaml,dst=/etc/mtproto/config.yaml,readonly \
+  -e SECRET=0123456789abcdef0123456789abcdef \
+  -e DOMAIN=itunes.apple.com \
+  ghcr.io/<owner>/<repository>:latest
+```
+
+容器没有 shell，也不需要 Python、OpenSSL 动态库或 QEMU。如需宿主机 443 端口，可使用 `-p 443:8443` 并将 Telegram 链接中的端口调整为 443。
+
+本地构建也必须使用 musl 静态产物；为每个架构同时构建 `mtproto` 和 `docker-entrypoint`（`cargo build --release --locked --bins --target <musl-target>`），分别放在 `docker-dist/amd64/` 和 `docker-dist/arm64/` 下，然后运行：
+
+```bash
+docker buildx build --platform linux/amd64,linux/arm64 \
+  -t ghcr.io/<owner>/<repository>:latest --push .
+```
+
+Dockerfile 只复制预构建二进制及公开配置示例，不重新编译 Rust。普通 glibc 动态链接的 `target/release/mtproto` 不能放入此 `scratch` 镜像。
+
 ## 配置格式
 
 ```yaml

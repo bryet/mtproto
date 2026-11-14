@@ -1,10 +1,19 @@
 [package]
 name = "mtproto"
+default-run = "mtproto"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 license = "GPL-2.0-only"
 description = "Async Rust port of the Python MTProto proxy"
+
+[[bin]]
+name = "mtproto"
+path = "src/main.rs"
+
+[[bin]]
+name = "docker-entrypoint"
+path = "docker-entrypoint"
 
 [dependencies]
 anyhow = "1.0"

@@ -1,19 +1,22 @@
 name: Build and Release
 
 on:
-  push:
-    tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+*'
-    branches:
-      - main
-    paths:
-      - 'Cargo.toml'
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version number (e.g. 0.1.0)'
+        description: 'Release version (e.g. 0.1.0, v0.1.0, or latest)'
         required: true
-        default: ''
+        default: 'latest'
+        type: string
+      clear_cache:
+        description: 'Delete existing Rust build caches before building'
+        required: false
+        default: false
+        type: boolean
+
+  push:
+    tags:
+      - 'v*'
 
 permissions:
   contents: write
@@ -23,108 +26,98 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # ── 版本信息准备 job ─────────────────────────────────────────────
+  # ── 版本准备 ─────────────────────────────────────────────
   prepare:
     name: Prepare release
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.VERSION }}
       tag_name: ${{ steps.version.outputs.TAG_NAME }}
-      is_tag_push: ${{ steps.version.outputs.IS_TAG_PUSH }}
-      should_build: ${{ steps.version.outputs.SHOULD_BUILD }}
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          fetch-tags: true
 
       - name: Determine version
         id: version
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "VERSION=${{ inputs.version }}" >> $GITHUB_OUTPUT
-            echo "TAG_NAME=v${{ inputs.version }}" >> $GITHUB_OUTPUT
-            echo "IS_TAG_PUSH=false" >> $GITHUB_OUTPUT
-            echo "SHOULD_BUILD=true" >> $GITHUB_OUTPUT
-
-          elif [ "${{ github.ref_type }}" = "tag" ]; then
-            TAG="${{ github.ref_name }}"
-            echo "VERSION=${TAG#v}" >> $GITHUB_OUTPUT
-            echo "TAG_NAME=${TAG}" >> $GITHUB_OUTPUT
-            echo "IS_TAG_PUSH=true" >> $GITHUB_OUTPUT
-            echo "SHOULD_BUILD=true" >> $GITHUB_OUTPUT
-
-          elif [ "${{ github.ref_name }}" = "main" ]; then
-            VER=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-            echo "VERSION=${VER}" >> $GITHUB_OUTPUT
-            echo "TAG_NAME=v${VER}" >> $GITHUB_OUTPUT
-            echo "IS_TAG_PUSH=false" >> $GITHUB_OUTPUT
-            echo "SHOULD_BUILD=false" >> $GITHUB_OUTPUT
-
-          else
-            echo "SHOULD_BUILD=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Auto-create release tag (main branch only)
-        id: create_tag
-        if: >
-          github.event_name == 'push' &&
-          github.ref_name == 'main' &&
-          steps.version.outputs.VERSION != ''
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          TAG="${{ steps.version.outputs.TAG_NAME }}"
-
-          if git rev-parse "${TAG}" >/dev/null 2>&1; then
-            echo "Tag ${TAG} already exists locally — skipping."
-            echo "TAG_CREATED=false" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          if git ls-remote --tags origin "${TAG}" | grep -q "${TAG}"; then
-            echo "Tag ${TAG} already exists on remote — skipping."
-            echo "TAG_CREATED=false" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          git tag -a "${TAG}" -m "release: ${TAG}"
-          git push origin "${TAG}"
-          echo "Created and pushed tag: ${TAG}"
-          echo "TAG_CREATED=true" >> $GITHUB_OUTPUT
-
-      - name: Trigger tag workflow
-        if: steps.create_tag.outputs.TAG_CREATED == 'true'
-        run: |
-          echo "Tag created successfully! Triggering new workflow run..."
-          gh workflow run release-build.yml \
-            --ref "${{ steps.version.outputs.TAG_NAME }}" \
-            --field version="${{ steps.version.outputs.VERSION }}"
-          echo "Workflow triggered! Check Actions tab for the new run."
+        shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Verify Cargo.toml version (tag push only)
-        if: steps.version.outputs.IS_TAG_PUSH == 'true'
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          TAG_VERSION="${{ steps.version.outputs.VERSION }}"
-          if [ "$CARGO_VERSION" != "$TAG_VERSION" ]; then
-            echo "ERROR: Cargo.toml version ($CARGO_VERSION) != tag version ($TAG_VERSION)"
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            TAG="${GITHUB_REF_NAME}"
+            VERSION="${TAG#v}"
+          else
+            VERSION="${INPUT_VERSION}"
+
+            if [[ "$VERSION" == "latest" ]]; then
+              VERSION=$(awk '
+                /^\[package\]/ { package=1; next }
+                /^\[/ { package=0 }
+                package && /^version[[:space:]]*=/ {
+                  gsub(/"/, "", $3)
+                  print $3
+                  exit
+                }
+              ' Cargo.toml)
+            fi
+
+            VERSION="${VERSION#v}"
+            TAG="v${VERSION}"
+          fi
+
+          if [[ -z "$VERSION" ]]; then
+            echo "ERROR: Unable to determine release version."
             exit 1
           fi
-          echo "Version check passed: $CARGO_VERSION"
 
-  # ── 构建 job ──────────────────────────────────────────────────────
+          echo "VERSION=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "TAG_NAME=${TAG}" >> "$GITHUB_OUTPUT"
+
+  # ── 删除构建缓存（可选）──────────────────────────────────
+  clear-cache:
+    name: Clear build cache
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && inputs.clear_cache
+
+    steps:
+      - name: Delete Rust build caches
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const caches = await github.paginate(
+              github.rest.actions.getActionsCacheList,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                per_page: 100
+              }
+            );
+
+            const targets = caches.filter(cache =>
+              cache.key.startsWith('Linux-cargo-')
+            );
+
+            for (const cache of targets) {
+              await github.rest.actions.deleteActionsCacheById({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                cache_id: cache.id
+              });
+            }
+
+            core.info(`Deleted ${targets.length} Rust build caches.`);
+
+  # ── 多平台构建 ───────────────────────────────────────────
   build:
     name: Build (${{ matrix.target }})
     runs-on: ubuntu-latest
-    needs: prepare
-    if: >
-      needs.prepare.outputs.should_build == 'true' &&
-      (needs.prepare.outputs.is_tag_push == 'true' || github.event_name == 'workflow_dispatch')
+    needs: [prepare, clear-cache]
+    if: >-
+      always() &&
+      needs.prepare.result == 'success' &&
+      (needs.clear-cache.result == 'success' || needs.clear-cache.result == 'skipped')
+
     strategy:
       fail-fast: false
       matrix:
@@ -135,8 +128,41 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+
+      # 仅修改 Runner 工作目录，不提交或推送回仓库
+      - name: Update Cargo.toml version
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+
+          path = "Cargo.toml"
+          version = os.environ["VERSION"]
+
+          with open(path, "r", encoding="utf-8") as f:
+              content = f.read()
+
+          pattern = r'(?ms)(^\[package\]\s*$.*?^\s*version\s*=\s*)("[^"]*")'
+
+          updated, count = re.subn(
+              pattern,
+              lambda m: m.group(1) + f'"{version}"',
+              content,
+              count=1
+          )
+
+          if count != 1:
+              raise SystemExit(
+                  "ERROR: Cannot find explicit version in [package] of Cargo.toml"
+              )
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(updated)
+
+          print(f"Cargo.toml version updated to {version}")
+          PY
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -153,65 +179,61 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          key: Linux-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-${{ matrix.target }}-
-            ${{ runner.os }}-cargo-
+            Linux-cargo-${{ matrix.target }}-
 
       - name: Build
         run: cross build --target ${{ matrix.target }} --release
 
       - name: Package
+        shell: bash
         run: |
           VERSION="${{ needs.prepare.outputs.version }}"
+          TARGET="${{ matrix.target }}"
           BIN_NAME="mtproto"
-          
           PKG_DIR="mtproto-v${VERSION}"
+          PKG_FILE="${BIN_NAME}-${TARGET}-v${VERSION}.tar.gz"
+
           mkdir -p "${PKG_DIR}"
-          
-          cp target/${{ matrix.target }}/release/${BIN_NAME} "${PKG_DIR}/"
-          [ -f "config.example.yaml" ] && cp config.example.yaml "${PKG_DIR}/" || true
-          
-          PKG_FILE="${BIN_NAME}-${{ matrix.target }}-v${VERSION}.tar.gz"
-          cd "${PKG_DIR}"
-          tar -czvf "../${PKG_FILE}" *
-          cd ..
-          
+
+          cp "target/${TARGET}/release/${BIN_NAME}" "${PKG_DIR}/"
+
+          for FILE in config.example.yaml; do
+            if [[ -f "$FILE" ]]; then
+              cp "$FILE" "${PKG_DIR}/"
+            fi
+          done
+
+          tar -czf "${PKG_FILE}" -C "${PKG_DIR}" .
+
           rm -rf "${PKG_DIR}"
-          
-          echo "PKG_FILE=${PKG_FILE}" >> $GITHUB_ENV
-          echo "PKG_PATH=${PKG_FILE}" >> $GITHUB_ENV
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: mtproto-${{ needs.prepare.outputs.version }}-${{ matrix.target }}
-          path: ${{ env.PKG_PATH }}
+          path: mtproto-${{ matrix.target }}-v${{ needs.prepare.outputs.version }}.tar.gz
+          if-no-files-found: error
 
-  # ── 统一 Release job ──────────────────────────────────────────────
+  # ── 发布 Release ─────────────────────────────────────────
   release:
     name: Create Release
     runs-on: ubuntu-latest
     needs: [prepare, build]
-    if: >
-      needs.prepare.outputs.should_build == 'true' &&
-      (needs.prepare.outputs.is_tag_push == 'true' || github.event_name == 'workflow_dispatch')
+
     steps:
-      - name: Download all artifacts
+      - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           path: ./artifacts
           merge-multiple: true
 
-      - name: List downloaded artifacts (debug)
-        run: |
-          ls -la ./artifacts
-          echo "Artifacts count: $(ls -1 ./artifacts | wc -l)"
-
-      - name: Create Release and upload assets
+      - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.prepare.outputs.TAG_NAME }}
+          tag_name: ${{ needs.prepare.outputs.tag_name }}
+          target_commitish: ${{ github.sha }}
           files: ./artifacts/*.tar.gz
           draft: false
           prerelease: ${{ contains(needs.prepare.outputs.version, '-') }}
