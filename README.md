@@ -32,7 +32,7 @@ cp config.example.yaml config.yaml
 - **手动运行**：在 Actions 中选择 **Build and Release**，填写 `version`，例如 `0.1.0`、`v0.1.0` 或 `0.1.0-rc.1`。
 - **手动输入 `latest`**：读取 `Cargo.toml` 的包版本，例如 `0.1.0`，发布为 `v0.1.0`；不会创建名为 `latest` 的 Release。
 - **推送标签**：推送 `v*` 标签时自动构建，标签应使用有效 Rust 版本，例如 `v0.1.0`。
-- **清理缓存**：手动运行时勾选 `clear_cache`，在构建前删除 `Linux-cargo-` 前缀的 Rust 构建缓存；默认不清理。标签推送不执行此清理步骤。
+- **清理缓存**：手动运行和标签推送均在 `release` 任务结束后自动删除仓库的所有 Actions 缓存，不再提供 `clear_cache` 开关。发布失败或被跳过时也会尝试清理；不删除 Actions 构建产物或 Release 附件。清理范围包含其他工作流的缓存，后续构建可能需要重新下载依赖和编译。
 
 工作流先校验版本格式（例如 `0.1.0`、`0.1.0-rc.1`；不接受带前导零的数字段、路径或换行），再在 Runner 工作目录同步更新 `Cargo.toml` 和 `Cargo.lock` 的根包版本，不提交或推送修改。构建使用 `--locked --bin mtproto` 并检查产物没有动态加载器或共享库依赖；缺失二进制、配置示例、服务单元、安装脚本或发布压缩包时会报错。包含连字符的版本会标记为预发布。发布使用 `GITHUB_TOKEN`，写入权限仅授予发布及缓存清理 Job。工作流串行执行，防止清理缓存与另一次发布构建相互干扰。
 
@@ -264,7 +264,7 @@ Unix 平台在正常启动时自动将 `RLIMIT_NOFILE` 软上限提高到已有�
 - `src/cli.rs` / `src/main.rs`：命令行参数、配置加载与程序入口。
 - `mtproto.service`：固定 `/var/mtproto` 路径的 systemd 服务单元。
 - `mtproto.sh`：交互式安装、更新、卸载、配置和服务管理。
-- `.github/workflows/release-build.yml`：双架构 musl 构建、打包、Release 发布和可选缓存清理。
+- `.github/workflows/release-build.yml`：双架构 musl 构建、打包、Release 发布和发布后的全量 Actions 缓存清理。
 
 ## 测试
 
