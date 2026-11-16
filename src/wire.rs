@@ -63,9 +63,7 @@ impl Reader {
     pub fn install_crypto(&mut self, mut crypto: Crypto) {
         // Fake-TLS may put the obfuscated header and payload in one record.
         // Bytes buffered while reading that header still need the new cipher.
-        let mut pending: Vec<u8> = self.buffer.drain(..).collect();
-        crypto.apply(&mut pending);
-        self.buffer.extend(pending);
+        crypto.apply(self.buffer.make_contiguous());
         self.crypto = crypto;
     }
     pub fn take_buffer(&mut self) -> Vec<u8> {
@@ -76,11 +74,11 @@ impl Reader {
         if self.tls {
             loop {
                 let mut header = [0u8; 5];
-                match self.raw.read_exact(&mut header).await {
-                    Ok(_) => (),
-                    Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(false),
-                    Err(e) => return Err(e),
+                // EOF before a record is normal; an incomplete header is not.
+                if self.raw.read(&mut header[..1]).await? == 0 {
+                    return Ok(false);
                 }
+                self.raw.read_exact(&mut header[1..]).await?;
                 if ![0x14, 0x17].contains(&header[0]) || header[1..3] != [3, 3] {
                     return Err(invalid("bad Fake-TLS record"));
                 }
@@ -94,7 +92,9 @@ impl Reader {
             }
         } else {
             let block = self.crypto.block_size();
-            data = vec![0; n.max(block)];
+            // A frame length is not a socket read-buffer size. Bound each
+            // allocation when a large frame arrives in many small reads.
+            data = vec![0; n.clamp(block, 64 * 1024)];
             let read = self.raw.read(&mut data).await?;
             if read == 0 {
                 return Ok(false);
@@ -122,6 +122,9 @@ impl Reader {
         Ok(self.buffer.drain(..n).collect())
     }
     pub async fn chunk(&mut self, n: usize) -> io::Result<Vec<u8>> {
+        if n == 0 {
+            return Ok(Vec::new());
+        }
         if self.buffer.is_empty() && !self.fill(n).await? {
             return Ok(Vec::new());
         }
@@ -131,11 +134,21 @@ impl Reader {
 }
 impl Writer {
     pub async fn write(&mut self, data: &[u8]) -> io::Result<()> {
+        if matches!(&self.crypto, Crypto::Plain) {
+            return self.write_ciphertext(data).await;
+        }
+        let mut data = data.to_vec();
+        self.write_mut(&mut data).await
+    }
+    /// Encrypt an owned packet in place rather than allocating a second copy.
+    pub async fn write_mut(&mut self, data: &mut [u8]) -> io::Result<()> {
         if data.len() % self.crypto.block_size() != 0 {
             return Err(invalid("unaligned plaintext"));
         }
-        let mut data = data.to_vec();
-        self.crypto.apply(&mut data);
+        self.crypto.apply(data);
+        self.write_ciphertext(data).await
+    }
+    async fn write_ciphertext(&mut self, data: &[u8]) -> io::Result<()> {
         if self.tls {
             for part in data.chunks(16384 + 24) {
                 let len = (part.len() as u16).to_be_bytes();
@@ -143,7 +156,7 @@ impl Writer {
                 self.raw.write_all(part).await?;
             }
         } else {
-            self.raw.write_all(&data).await?;
+            self.raw.write_all(data).await?;
         }
         self.raw.flush().await
     }

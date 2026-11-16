@@ -21,6 +21,12 @@ pub fn hmac(secret: &[u8], data: &[u8]) -> [u8; 32] {
 }
 pub fn verify_hmac_prefix(secret: &[u8], data: &[u8], digest: &[u8], prefix: usize) -> bool {
     let expected = hmac(secret, data);
+    constant_time_prefix_eq(&expected, digest, prefix)
+}
+pub fn constant_time_prefix_eq(expected: &[u8], digest: &[u8], prefix: usize) -> bool {
+    if prefix > expected.len() || prefix > digest.len() {
+        return false;
+    }
     let mut difference = 0u8;
     for i in 0..prefix {
         difference |= expected[i] ^ digest[i];

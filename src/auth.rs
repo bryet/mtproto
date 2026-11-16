@@ -111,10 +111,10 @@ fn tls_auth_diagnostic(
     let mut zeroed = hello.to_vec();
     zeroed[11..43].fill(0);
     for secret in &c.secrets {
-        if !crypto::verify_hmac_prefix(secret, &zeroed, digest, 28) {
+        let computed = crypto::hmac(secret, &zeroed);
+        if !crypto::constant_time_prefix_eq(&computed, digest, 28) {
             continue;
         }
-        let computed = crypto::hmac(secret, &zeroed);
         let mut timestamp = [0; 4];
         for i in 0..4 {
             timestamp[i] = digest[28 + i] ^ computed[28 + i];
@@ -257,12 +257,7 @@ pub async fn handshake(
         if !c.tls && !c.classic {
             return Ok(Handshake::Rejected(header));
         }
-        if state
-            .replays
-            .lock()
-            .unwrap()
-            .contains(&header[11..27].to_vec())
-        {
+        if state.has_replay(&header[11..27], c.replay_len) {
             state.duplicate_handshake(peer.ip());
             return Ok(Handshake::Rejected(header));
         }
@@ -289,12 +284,7 @@ pub async fn handshake(
         }
         header.extend_from_slice(&reader.exact(64 - header.len()).await?);
     }
-    if state
-        .replays
-        .lock()
-        .unwrap()
-        .contains(&header[8..56].to_vec())
-    {
+    if state.has_replay(&header[8..56], c.replay_len) {
         state.duplicate_handshake(peer.ip());
         return Ok(Handshake::Rejected(header));
     }

@@ -1,0 +1,14 @@
+[Unit]
+Description=Mtproto Service
+After=network.target
+
+[Service]
+User=root
+Group=root
+WorkingDirectory=/var/mtproto
+ExecStart=/var/mtproto/mtproto -c /var/mtproto/config.yaml
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

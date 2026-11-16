@@ -40,7 +40,7 @@ async fn pipe_raw(
     state: Arc<State>,
 ) -> Result<()> {
     loop {
-        let data = if read_timeout.is_some() {
+        let mut data = if read_timeout.is_some() {
             timeout(
                 Duration::from_secs(state.config().read_timeout),
                 reader.chunk(buffer),
@@ -54,7 +54,7 @@ async fn pipe_raw(
             return Ok(());
         }
         user.transfer(data.len(), read_timeout.is_none());
-        writer.write(&data).await?;
+        writer.write_mut(&mut data).await?;
     }
 }
 async fn pipe_client(
@@ -100,9 +100,8 @@ async fn pipe_middle(
             return Ok(());
         }
         user.transfer(packet.data.len(), false);
-        writer
-            .write(&protocol::encode_client(protocol, &packet)?)
-            .await?;
+        let mut encoded = protocol::encode_client(protocol, &packet)?;
+        writer.write_mut(&mut encoded).await?;
     }
 }
 pub async fn handle_stream<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
@@ -335,12 +334,40 @@ pub fn bind_tcp(ip: &str, port: u16) -> Result<TcpListener> {
     socket.listen(1024)?;
     Ok(TcpListener::from_std(socket.into())?)
 }
+fn retryable_accept_error(error: &std::io::Error) -> bool {
+    if matches!(
+        error.kind(),
+        std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::Interrupted
+            | std::io::ErrorKind::WouldBlock
+    ) {
+        return true;
+    }
+    #[cfg(unix)]
+    if matches!(
+        error.raw_os_error(),
+        Some(libc::EMFILE) | Some(libc::ENFILE) | Some(libc::ENOBUFS) | Some(libc::ENOMEM)
+    ) {
+        return true;
+    }
+    false
+}
 async fn accept_tcp(listener: TcpListener, state: Arc<State>, is_metrics: bool) -> Result<()> {
     let mut clients = JoinSet::new();
     loop {
         tokio::select! {
             accepted = listener.accept() => {
-                let (stream, peer) = accepted?; let state = state.clone();
+                let (stream, peer) = match accepted {
+                    Ok(connection) => connection,
+                    Err(error) if retryable_accept_error(&error) => {
+                        tracing::warn!(%error, "接受 TCP 连接失败，稍后重试");
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+                let state = state.clone();
                 if !is_metrics { upstream::socket_options(&stream, &state.config(), true, state.current.load(Ordering::Relaxed)); }
                 clients.spawn(async move {
                     let result = if is_metrics { serve_metrics(stream, peer, state).await } else {
@@ -366,7 +393,16 @@ async fn accept_unix(listener: tokio::net::UnixListener, state: Arc<State>) -> R
     loop {
         tokio::select! {
             accepted = listener.accept() => {
-                let (stream, _) = accepted?; let state = state.clone();
+                let (stream, _) = match accepted {
+                    Ok(connection) => connection,
+                    Err(error) if retryable_accept_error(&error) => {
+                        tracing::warn!(%error, "接受 Unix 连接失败，稍后重试");
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+                let state = state.clone();
                 clients.spawn(async move {
                     if let Err(e) = handle_stream(stream, "0.0.0.0:0".parse().unwrap(), state).await { tracing::debug!(error = %e, "Unix 连接结束"); }
                 });
@@ -378,13 +414,16 @@ async fn accept_unix(listener: tokio::net::UnixListener, state: Arc<State>) -> R
 #[cfg(unix)]
 struct UnixPath {
     path: PathBuf,
+    device: u64,
     inode: u64,
 }
 #[cfg(unix)]
 impl Drop for UnixPath {
     fn drop(&mut self) {
-        use std::os::unix::fs::MetadataExt;
-        if std::fs::symlink_metadata(&self.path).is_ok_and(|m| m.ino() == self.inode) {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        if std::fs::symlink_metadata(&self.path).is_ok_and(|m| {
+            m.dev() == self.device && m.ino() == self.inode && m.file_type().is_socket()
+        }) {
             let _ = std::fs::remove_file(&self.path);
         }
     }
@@ -392,7 +431,19 @@ impl Drop for UnixPath {
 
 pub async fn run(state: Arc<State>, path: PathBuf) -> Result<()> {
     let c = state.config();
+    // Install handlers before potentially slow public-IP discovery.
+    #[cfg(unix)]
+    let (mut terminate, mut interrupt, mut reload, mut debug) = {
+        use tokio::signal::unix::{signal, SignalKind};
+        (
+            signal(SignalKind::terminate())?,
+            signal(SignalKind::interrupt())?,
+            signal(SignalKind::user_defined2())?,
+            signal(SignalKind::user_defined1())?,
+        )
+    };
     let mut tasks = JoinSet::new();
+    let mut listeners = Vec::new();
     let mut bound = 0;
     for (ip, port, is_metrics) in [
         (&c.listen_v4, c.port, false),
@@ -405,7 +456,16 @@ pub async fn run(state: Arc<State>, path: PathBuf) -> Result<()> {
         }
         let listener = match bind_tcp(ip, port) {
             Ok(listener) => listener,
-            Err(e) if ip.contains(':') && bound > 0 => {
+            Err(e)
+                if !is_metrics && ip.contains(':') && bound > 0
+                    && e.downcast_ref::<std::io::Error>().is_some_and(|error| {
+                        error.kind() == std::io::ErrorKind::AddrNotAvailable
+                            || matches!(
+                                error.raw_os_error(),
+                                Some(libc::EAFNOSUPPORT) | Some(libc::EPROTONOSUPPORT)
+                            )
+                    }) =>
+            {
                 tracing::warn!(%ip, port, error = %e, "IPv6 监听不可用");
                 continue;
             }
@@ -415,32 +475,48 @@ pub async fn run(state: Arc<State>, path: PathBuf) -> Result<()> {
             bound += 1;
         }
         tracing::info!(%ip, port, metrics = is_metrics, "开始监听");
-        tasks.spawn(accept_tcp(listener, state.clone(), is_metrics));
+        listeners.push((listener, is_metrics));
     }
     #[cfg(unix)]
-    let _unix_path = if !c.listen_unix.is_empty() {
+    let unix_listener = if !c.listen_unix.is_empty() {
         use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
         let unix_path = PathBuf::from(&c.listen_unix);
         if let Ok(metadata) = std::fs::symlink_metadata(&unix_path) {
             if !metadata.file_type().is_socket() {
                 bail!("LISTEN_UNIX_SOCK 已存在且不是 socket，拒绝覆盖");
             }
-            // Do not silently take over another running server's socket.
-            if tokio::net::UnixStream::connect(&unix_path).await.is_ok() {
-                bail!("Unix socket 已被其他服务使用");
+            // Only connection refusal establishes that a socket is stale.
+            // Permission errors, timeouts and other failures must not unlink it.
+            match timeout(
+                Duration::from_secs(1),
+                tokio::net::UnixStream::connect(&unix_path),
+            )
+            .await
+            {
+                Ok(Ok(_)) => bail!("Unix socket 已被其他服务使用"),
+                Ok(Err(error)) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+                    let current = std::fs::symlink_metadata(&unix_path)?;
+                    if current.dev() != metadata.dev() || current.ino() != metadata.ino()
+                        || !current.file_type().is_socket()
+                    {
+                        bail!("Unix socket 路径在检测过程中发生变化，拒绝删除");
+                    }
+                    std::fs::remove_file(&unix_path)?;
+                }
+                Ok(Err(error)) => return Err(error).context("无法检查 Unix socket 是否被使用"),
+                Err(_) => bail!("Unix socket 检查超时，拒绝删除"),
             }
-            std::fs::remove_file(&unix_path)?;
         }
         let listener = tokio::net::UnixListener::bind(&unix_path)?;
-        let inode = std::fs::symlink_metadata(&unix_path)?.ino();
+        let metadata = std::fs::symlink_metadata(&unix_path)?;
         let guard = UnixPath {
             path: unix_path.clone(),
-            inode,
+            device: metadata.dev(),
+            inode: metadata.ino(),
         };
         std::fs::set_permissions(&unix_path, std::fs::Permissions::from_mode(0o666))?;
-        tasks.spawn(accept_unix(listener, state.clone()));
         bound += 1;
-        Some(guard)
+        Some((listener, guard))
     } else {
         None
     };
@@ -451,7 +527,28 @@ pub async fn run(state: Arc<State>, path: PathBuf) -> Result<()> {
     if bound == 0 {
         bail!("没有可用的代理监听器");
     }
-    maintenance::init_ips(&state).await;
+    #[cfg(unix)]
+    tokio::select! {
+        _ = maintenance::init_ips(&state) => (),
+        _ = terminate.recv() => return Ok(()),
+        _ = interrupt.recv() => return Ok(()),
+    }
+    #[cfg(not(unix))]
+    tokio::select! {
+        _ = maintenance::init_ips(&state) => (),
+        result = tokio::signal::ctrl_c() => { result?; return Ok(()); }
+    }
+    // Do not authenticate clients until public IPs and routing are initialized.
+    for (listener, is_metrics) in listeners {
+        tasks.spawn(accept_tcp(listener, state.clone(), is_metrics));
+    }
+    #[cfg(unix)]
+    let _unix_path = if let Some((listener, guard)) = unix_listener {
+        tasks.spawn(accept_unix(listener, state.clone()));
+        Some(guard)
+    } else {
+        None
+    };
     state.print_links();
     let s = state.clone();
     tasks.spawn(async move {
@@ -470,11 +567,6 @@ pub async fn run(state: Arc<State>, path: PathBuf) -> Result<()> {
     });
     #[cfg(unix)]
     {
-        use tokio::signal::unix::{signal, SignalKind};
-        let mut terminate = signal(SignalKind::terminate())?;
-        let mut interrupt = signal(SignalKind::interrupt())?;
-        let mut reload = signal(SignalKind::user_defined2())?;
-        let mut debug = signal(SignalKind::user_defined1())?;
         loop {
             tokio::select! {
                 _ = terminate.recv() => break,

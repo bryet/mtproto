@@ -194,8 +194,10 @@ jobs:
           fi
           PACKAGE="mtproto-$TARGET-v$VERSION.tar.gz"
           STAGING="$(mktemp -d "$RUNNER_TEMP/mtproto-package.XXXXXX")"
-          cp "$BINARY" config.example.yaml "$STAGING/"
-          tar -czf "$PACKAGE" -C "$STAGING" mtproto config.example.yaml
+          cp "$BINARY" config.example.yaml mtproto.service mtproto.sh "$STAGING/"
+          chmod 755 "$STAGING/mtproto" "$STAGING/mtproto.sh"
+          chmod 644 "$STAGING/config.example.yaml" "$STAGING/mtproto.service"
+          tar -czf "$PACKAGE" -C "$STAGING" mtproto config.example.yaml mtproto.service mtproto.sh
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

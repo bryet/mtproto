@@ -61,17 +61,28 @@ impl<T> Default for BoundedSet<T> {
     }
 }
 impl<T: std::hash::Hash + Eq + Clone> BoundedSet<T> {
-    pub fn contains(&self, key: &T) -> bool {
+    pub fn contains<Q: std::hash::Hash + Eq + ?Sized>(&self, key: &Q) -> bool
+    where
+        T: std::borrow::Borrow<Q>,
+    {
         self.set.contains(key)
     }
-    pub fn insert(&mut self, key: T, limit: usize) -> bool {
+    pub fn set_limit(&mut self, limit: usize) {
         if limit == 0 {
-            return true;
+            self.set.clear();
+            self.order.clear();
+            return;
         }
         while self.order.len() > limit {
             if let Some(old) = self.order.pop_front() {
                 self.set.remove(&old);
             }
+        }
+    }
+    pub fn insert(&mut self, key: T, limit: usize) -> bool {
+        self.set_limit(limit);
+        if limit == 0 {
+            return true;
         }
         if self.set.contains(&key) {
             return false;
@@ -198,7 +209,13 @@ impl State {
             .or_default()
             .clone()
     }
+    pub fn has_replay(&self, key: &[u8], limit: usize) -> bool {
+        limit > 0 && self.replays.lock().unwrap().contains(key)
+    }
     pub fn replay(&self, key: &[u8], limit: usize) -> bool {
+        if limit == 0 {
+            return true;
+        }
         self.replays.lock().unwrap().insert(key.to_vec(), limit)
     }
     pub fn remember_ip(&self, ip: IpAddr, limit: usize) {
@@ -249,6 +266,8 @@ impl State {
         if next.log_level != previous.log_level {
             tracing::warn!("日志级别变更需要重启");
         }
+        self.replays.lock().unwrap().set_limit(next.replay_len);
+        self.client_ips.lock().unwrap().set_limit(next.client_ips_len);
         *self.config.write().unwrap() = Arc::new(next);
         *self.mask_dns.lock().unwrap() = None;
         Ok(())

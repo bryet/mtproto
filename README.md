@@ -34,7 +34,7 @@ cp config.example.yaml config.yaml
 - **推送标签**：推送 `v*` 标签时自动构建，标签应使用有效 Rust 版本，例如 `v0.1.0`。
 - **清理缓存**：手动运行时勾选 `clear_cache`，在构建前删除 `Linux-cargo-` 前缀的 Rust 构建缓存；默认不清理。标签推送不执行此清理步骤。
 
-工作流先校验版本格式（例如 `0.1.0`、`0.1.0-rc.1`；不接受带前导零的数字段、路径或换行），再在 Runner 工作目录同步更新 `Cargo.toml` 和 `Cargo.lock` 的根包版本，不提交或推送修改。构建使用 `--locked --bin mtproto` 并检查产物没有动态加载器或共享库依赖；缺失配置示例或发布压缩包时会报错。包含连字符的版本会标记为预发布。发布使用 `GITHUB_TOKEN`，写入权限仅授予发布及缓存清理 Job。工作流串行执行，防止清理缓存与另一次发布构建相互干扰。
+工作流先校验版本格式（例如 `0.1.0`、`0.1.0-rc.1`；不接受带前导零的数字段、路径或换行），再在 Runner 工作目录同步更新 `Cargo.toml` 和 `Cargo.lock` 的根包版本，不提交或推送修改。构建使用 `--locked --bin mtproto` 并检查产物没有动态加载器或共享库依赖；缺失二进制、配置示例、服务单元、安装脚本或发布压缩包时会报错。包含连字符的版本会标记为预发布。发布使用 `GITHUB_TOKEN`，写入权限仅授予发布及缓存清理 Job。工作流串行执行，防止清理缓存与另一次发布构建相互干扰。
 
 ### 发布产物
 
@@ -43,11 +43,23 @@ cp config.example.yaml config.yaml
 | Linux AMD64 | `mtproto-x86_64-unknown-linux-musl-v0.1.0.tar.gz` |
 | Linux ARM64 | `mtproto-aarch64-unknown-linux-musl-v0.1.0.tar.gz` |
 
-压缩包包含 `mtproto` 和 `config.example.yaml`。从 GitHub Releases 下载适合服务器架构的压缩包后，在下载目录执行：
+每个压缩包包含以下文件，直接放在压缩包根目录：
+
+| 文件 | 用途 |
+| --- | --- |
+| `mtproto` | 对应架构的静态链接二进制，具有执行权限 |
+| `config.example.yaml` | YAML 配置示例，部署前必须更换 SECRET |
+| `mtproto.service` | systemd 服务单元，使用 `/var/mtproto/config.yaml` |
+| `mtproto.sh` | Bash 交互式安装与管理脚本，具有执行权限 |
+
+从 GitHub Releases 下载适合服务器架构的压缩包后，在下载目录执行。下方版本号只是示例，请替换为实际下载的版本：
 
 ```bash
 # ARM64 请替换为 aarch64 对应的文件名
-tar -xzf mtproto-x86_64-unknown-linux-musl-v0.1.0.tar.gz
+ARCHIVE="$PWD/mtproto-x86_64-unknown-linux-musl-v0.1.0.tar.gz"
+RELEASE_DIR="$(mktemp -d)"
+tar -xzf "$ARCHIVE" -C "$RELEASE_DIR"
+cd "$RELEASE_DIR"
 cp config.example.yaml config.yaml
 
 # 生成随机密钥，再将输出填入 config.yaml 的 SECRET
@@ -59,11 +71,102 @@ cp config.example.yaml config.yaml
 也可以直接指定已有配置文件：
 
 ```bash
-./mtproto -c /root/test/config.yaml --check-config
-./mtproto -c /root/test/config.yaml
+./mtproto -c /etc/mtproto/config.yaml --check-config
+./mtproto -c /etc/mtproto/config.yaml
 ```
 
 程序默认读取当前工作目录的 `config.yaml`，可用 `-c` / `--config` 指定路径。端口、密钥、TLS 域名和广告标签均在 YAML 中设置；程序不使用环境变量覆盖 YAML 配置。日志级别仍可通过 `RUST_LOG` 覆盖。
+
+## 安装与服务管理
+
+### 使用交互式脚本
+
+解压发布包后执行：
+
+```bash
+sudo bash ./mtproto.sh
+```
+
+已登录 root 账号时可直接使用 `bash ./mtproto.sh`。请将脚本保留在 `/var/mtproto` 以外的持久目录中，方便后续管理；上面的临时解压目录可能被系统清理。
+
+- **要求**：Linux AMD64/ARM64、root 权限和 Bash。脚本当前支持 Ubuntu、Debian、Kali、CentOS、Fedora、AlmaLinux、Rocky Linux、Oracle Linux、Alpine。除 Alpine 使用 OpenRC 外，其余系统需要正在运行的 systemd；仅安装了这些发行版的容器不一定能使用服务管理功能。
+- **依赖**：首次安装时检查并安装 `wget`、`curl`、`tar`、`gzip`，还需要系统基本命令。Alpine 默认没有 Bash 时，先执行 `apk add bash`；OpenRC 的 `rc-service`、`rc-update` 和 `supervise-daemon` 也需要可用。安装缺失依赖时会先运行包管理器更新命令，RPM 系统的 `dnf update` / `yum update` 可能升级已有软件包。
+- **菜单**：`1` 安装、`2` 卸载、`3` 更新、`4` 启动、`5` 停止、`6` 重启、`7` 修改配置、`8` 查看链接、`9` 查看日志、`0` 退出。
+- **安装**：脚本从 GitHub 获取最新正式 Release，并重新下载对应架构的压缩包，不直接使用解压目录里的二进制；因此需要访问 GitHub。首次配置依次选择端口、密钥模式和广告标签。端口范围为 `10000–65535`，留空随机生成；密钥模式默认选择 TLS，默认伪装域名为 `itunes.apple.com`，基础 SECRET 由二进制随机生成；AD_TAG 留空禁用。安装成功启动服务后启用开机自启，脚本不会自动放行防火墙端口。
+- **更新**：菜单 `3` 更新二进制，并在 systemd 系统同步服务单元；下载和解压成功后才停止服务，更新完成后重新启动。保留 `config.yaml` 和 `mtp_info`，不会自动更新正在使用的管理脚本。GitHub 的 `releases/latest` 不包含预发布，指定版本或预发布请手动下载部署。
+- **卸载**：确认后停止服务、禁用自启、删除服务文件和整个 `/var/mtproto`，包括配置、版本与链接信息；请提前备份需要保留的数据。
+
+安装目录与管理文件：
+
+| 路径 | 用途 |
+| --- | --- |
+| `/var/mtproto/mtproto` | 二进制程序 |
+| `/var/mtproto/config.yaml` | 实际运行配置，首次创建权限为 `600` |
+| `/var/mtproto/mtp_info` | 脚本显示链接使用的 IP、端口、客户端密钥和标签 |
+| `/var/mtproto/version` | 已安装的 Release 标签 |
+| `/etc/systemd/system/mtproto.service` | systemd 服务单元 |
+| `/etc/init.d/mtproto` | Alpine 上由脚本生成的 OpenRC 服务脚本 |
+
+程序始终以 `config.yaml` 为准，`mtp_info` 不是程序配置。若绕过菜单手动修改配置，脚本显示的链接信息不会自动同步；可从程序启动日志获取实际链接。`mtp_info` 中也有密钥，应限制文件访问权限。
+
+### 手动安装 systemd 服务
+
+以下命令在已解压的发布目录执行，需要 root 权限。随包的服务单元以 **root** 用户/组运行，工作目录为 `/var/mtproto`，异常退出后等待 5 秒重启；它不是非特权或沙箱化部署。
+
+```bash
+sudo mkdir -p /var/mtproto
+sudo install -m 755 ./mtproto /var/mtproto/mtproto
+
+# 仅在配置不存在时复制示例，不覆盖已有配置
+if ! sudo test -e /var/mtproto/config.yaml; then
+    sudo install -m 600 ./config.example.yaml /var/mtproto/config.yaml
+fi
+
+# 必须先更换 SECRET，再按需设置端口、模式、TLS_DOMAIN、AD_TAG 等
+sudo editor /var/mtproto/config.yaml
+sudo /var/mtproto/mtproto -c /var/mtproto/config.yaml --check-config
+```
+
+若没有 `editor` 命令，请使用已安装的文本编辑器。配置检查通过后再安装服务并启动：
+
+```bash
+sudo install -m 644 ./mtproto.service /etc/systemd/system/mtproto.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now mtproto.service
+sudo systemctl status mtproto.service
+```
+
+常用管理命令：
+
+```bash
+sudo systemctl restart mtproto.service
+sudo systemctl stop mtproto.service
+sudo systemctl disable mtproto.service
+
+# 运行日志和启动时输出的代理链接
+sudo journalctl -u mtproto.service -n 100 --no-pager
+sudo journalctl -u mtproto.service -f
+
+# 修改配置后重载；监听地址/端口变更仍需重启
+sudo systemctl kill --kill-whom=main --signal=SIGUSR2 mtproto.service
+```
+
+手动安装不生成脚本的 `mtp_info` 和 `version`，请直接使用 systemd 和 YAML 配置管理。更新二进制前应停止服务，保留现有配置；如果同时更新服务单元，执行 `systemctl daemon-reload` 后再启动。
+
+### Alpine / OpenRC
+
+交互式脚本会生成 OpenRC 服务，不使用 `mtproto.service`。常用命令：
+
+```bash
+rc-service mtproto status
+rc-service mtproto restart
+rc-service mtproto stop
+rc-update add mtproto default
+rc-update del mtproto default
+tail -f /var/mtproto/log_mtproto
+```
+
+systemd 部署日志在 journal 中；脚本生成的 OpenRC 服务将 stdout/stderr 写入 `/var/mtproto/log_mtproto`。日志可能包含客户端 IP 和代理密钥/链接，不应公开。
 
 ## 配置格式
 
@@ -159,6 +262,9 @@ Unix 平台在正常启动时自动将 `RLIMIT_NOFILE` 软上限提高到已有�
 - `src/system.rs`：Unix 文件描述符资源上限调整。
 - `src/server.rs`：监听、双向转发、指标与信号。
 - `src/cli.rs` / `src/main.rs`：命令行参数、配置加载与程序入口。
+- `mtproto.service`：固定 `/var/mtproto` 路径的 systemd 服务单元。
+- `mtproto.sh`：交互式安装、更新、卸载、配置和服务管理。
+- `.github/workflows/release-build.yml`：双架构 musl 构建、打包、Release 发布和可选缓存清理。
 
 ## 测试
 
@@ -176,4 +282,4 @@ cargo clippy --locked --all-targets -- -D warnings
 
 ## 许可
 
-遵循仓库根目录 `../LICENSE` 的 GPL v2 许可；此项目来自同仓库 Python 实现的协议移植。
+`Cargo.toml` 声明许可证为 `GPL-2.0-only`，即 GNU GPL v2；本项目由 Python MTProto 代理实现移植而来。

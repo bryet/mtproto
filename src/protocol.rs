@@ -145,13 +145,13 @@ impl FrameReader {
 }
 impl FrameWriter {
     pub async fn write(&mut self, data: &[u8]) -> io::Result<()> {
-        let out = encode_frame(data, self.sequence)?;
+        let mut out = encode_frame(data, self.sequence)?;
         self.sequence = self.sequence.wrapping_add(1);
-        self.writer.write(&out).await
+        self.writer.write_mut(&mut out).await
     }
 }
 pub fn encode_frame(data: &[u8], sequence: i32) -> io::Result<Vec<u8>> {
-    if data.len() + 12 > MAX_MESSAGE || data.len() % 4 != 0 {
+    if data.len() > MAX_MESSAGE - 12 || data.len() % 4 != 0 {
         return Err(invalid("bad RPC output length"));
     }
     let mut out = Vec::with_capacity(data.len() + 28);

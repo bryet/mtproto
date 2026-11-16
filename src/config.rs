@@ -255,11 +255,14 @@ impl Config {
         let prefer_ipv6 = f.boolean("PREFER_IPV6", !middle)?;
         let fast = f.boolean("FAST_MODE", true)?;
         let proxy_protocol = f.boolean("PROXY_PROTOCOL", false)?;
-        let replay_len = f.number("REPLAY_CHECK_LEN", 65536)? as usize;
-        let client_ips_len = f.number("CLIENT_IPS_LEN", 131072)? as usize;
+        let replay_len = f.number("REPLAY_CHECK_LEN", 65536)?;
+        let client_ips_len = f.number("CLIENT_IPS_LEN", 131072)?;
+        // Check u64 values before casting to avoid wraparound on 32-bit targets.
         if replay_len > 10_000_000 || client_ips_len > 10_000_000 {
             bail!("缓存上限不能超过 10000000");
         }
+        let replay_len = replay_len as usize;
+        let client_ips_len = client_ips_len as usize;
         let ignore_time_skew = f.boolean("IGNORE_TIME_SKEW", false)?;
         let metrics_port = match f.take("METRICS_PORT") {
             None | Some(Value::Null) => None,
@@ -271,6 +274,35 @@ impl Config {
         };
         let metrics_v4 = f.text("METRICS_LISTEN_ADDR_IPV4", "0.0.0.0")?;
         let metrics_v6 = f.text("METRICS_LISTEN_ADDR_IPV6", "")?;
+        for (key, address, ipv6) in [
+            ("METRICS_LISTEN_ADDR_IPV4", &metrics_v4, false),
+            ("METRICS_LISTEN_ADDR_IPV6", &metrics_v6, true),
+        ] {
+            if !address.is_empty() {
+                let ip: IpAddr = address
+                    .parse()
+                    .with_context(|| format!("{key} 必须为 IP"))?;
+                if ip.is_ipv6() != ipv6 {
+                    bail!("{key} 地址族不正确");
+                }
+            }
+        }
+        if let Some(metrics_port) = metrics_port {
+            if metrics_v4.is_empty() && metrics_v6.is_empty() {
+                bail!("配置 METRICS_PORT 时至少需要一个指标监听地址");
+            }
+            if metrics_port == port {
+                for (proxy, metrics) in [(&listen_v4, &metrics_v4), (&listen_v6, &metrics_v6)] {
+                    if !proxy.is_empty() && !metrics.is_empty() {
+                        let proxy: IpAddr = proxy.parse()?;
+                        let metrics: IpAddr = metrics.parse()?;
+                        if proxy == metrics || proxy.is_unspecified() || metrics.is_unspecified() {
+                            bail!("代理与指标服务不能共用同一监听地址和端口");
+                        }
+                    }
+                }
+            }
+        }
         let metrics_prefix = f.text("METRICS_PREFIX", "mtproxy_")?;
         if !metrics_prefix
             .bytes()
