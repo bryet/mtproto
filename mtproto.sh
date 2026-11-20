@@ -332,7 +332,7 @@ Set_passwd(){
     [[ -z "${mtp_mode}" ]] && mtp_mode="3"
 
     # 生成基础密钥（32位十六进制字符，即16字节）
-    mtp_passwd=$("$mtp_file" --generate-secret) || return 1
+    mtp_passwd=$("$mtp_file" --secret) || return 1
 
     case "${mtp_mode}" in
         1)

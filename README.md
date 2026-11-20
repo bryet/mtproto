@@ -12,7 +12,7 @@ cargo build --release --locked --bin mtproto
 cp config.example.yaml config.yaml
 
 # 生成随机密钥，然后把输出填入 config.yaml 的 SECRET
-./target/release/mtproto --generate-secret
+./target/release/mtproto --secret
 
 # 只检查配置，不监听、不访问网络
 ./target/release/mtproto -c config.yaml --check-config
@@ -63,7 +63,7 @@ cd "$RELEASE_DIR"
 cp config.example.yaml config.yaml
 
 # 生成随机密钥，再将输出填入 config.yaml 的 SECRET
-./mtproto --generate-secret
+./mtproto --secret
 ./mtproto -c config.yaml --check-config
 ./mtproto -c config.yaml
 ```

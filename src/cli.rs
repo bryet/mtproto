@@ -10,15 +10,15 @@ pub async fn run() -> Result<()> {
         match arg.as_str() {
             "-c" | "--config" => path = args.next().context("--config 需要文件路径")?.into(),
             "--check-config" => check = true,
-            "--generate-secret" => {
+            "-s" | "--secret" => {
                 println!("{}", hex::encode(crypto::random::<16>()));
                 return Ok(());
             }
             "-h" | "--help" => {
-                println!("mtproto [-c <config.yaml>] [--check-config]\n\n默认配置：当前目录/config.yaml\n--generate-secret   生成 16 字节随机 SECRET\n--check-config      仅验证配置，不监听、不访问网络\nSIGUSR2             重载配置（端口变更需要重启）\nSIGINT / SIGTERM    关闭服务");
+                println!("mtproto [-c <config.yaml>] [-s|--secret] [--check-config]\n\n默认配置：当前目录/config.yaml\n-s, --secret         生成 16 字节随机 SECRET\n--check-config       仅验证配置，不监听、不访问网络\nSIGUSR2              重载配置（端口变更需要重启）\nSIGINT / SIGTERM     关闭服务");
                 return Ok(());
             }
-            "-V" | "--version" => {
+            "-v" | "--version" => {
                 println!("mtproto {}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
             }
